@@ -1,289 +1,405 @@
 package dynamicformula
 
 import (
-	"reflect"
-	"sync"
+	"fmt"
 	"testing"
-	"time"
+
+	"github.com/force-c/dynamic-formula/utils"
+	"github.com/shopspring/decimal"
 )
 
-// TestTTLCache_SetGetDelete 测试 TTLCache 的基本功能
-func TestTTLCache_SetGetDelete(t *testing.T) {
-	cache := NewTTLCache()
-	defer cache.Stop()
-
-	key := "test_key"
-	value := "test_value"
-	ttl := 1 * time.Second
-
-	err := cache.Set(key, value, ttl)
-	if err != nil {
-		t.Fatalf("Set failed: %v", err)
-	}
-
-	got, found := cache.Get(key)
-	if !found {
-		t.Fatal("Get: value not found immediately after Set")
-	}
-	if got != value {
-		t.Fatalf("Get: expected %v, got %v", value, got)
-	}
-
-	err = cache.Delete(key)
-	if err != nil {
-		t.Fatalf("Delete failed: %v", err)
-	}
-	_, found = cache.Get(key)
-	if found {
-		t.Fatal("Delete: key should be removed")
-	}
-}
-
-// TestTTLCache_Expiration 测试 TTL 过期逻辑
-func TestTTLCache_Expiration(t *testing.T) {
-	cache := NewTTLCache()
-	defer cache.Stop()
-
-	key := "expire_key"
-	value := 123
-	ttl := 500 * time.Millisecond
-
-	err := cache.Set(key, value, ttl)
-	if err != nil {
-		t.Fatalf("Set failed: %v", err)
-	}
-
-	got, found := cache.Get(key)
-	if !found || got != value {
-		t.Fatalf("Get: expected %v, got %v, found=%v", value, got, found)
-	}
-
-	time.Sleep(600 * time.Millisecond)
-
-	_, found = cache.Get(key)
-	if found {
-		t.Fatal("Get: key should have expired")
-	}
-}
-
-// TestTTLCache_ComplexValue 测试复杂类型存储
-func TestTTLCache_ComplexValue(t *testing.T) {
-	cache := NewTTLCache()
-	defer cache.Stop()
-
-	type testStruct struct {
-		Name string
-		Age  int
-	}
-	key := "struct_key"
-	value := testStruct{Name: "Alice", Age: 30}
-	ttl := 1 * time.Second
-
-	err := cache.Set(key, value, ttl)
-	if err != nil {
-		t.Fatalf("Set failed: %v", err)
-	}
-
-	got, found := cache.Get(key)
-	if !found {
-		t.Fatal("Get: value not found")
-	}
-	gotStruct := got.(testStruct)
-	if !reflect.DeepEqual(gotStruct, value) {
-		t.Fatalf("Get: expected %+v, got %+v", value, gotStruct)
-	}
-}
-
-// TestTTLCache_NodeSlice 测试缓存 Node 切片
-func TestTTLCache_NodeSlice(t *testing.T) {
-	cache := NewTTLCache()
-	defer cache.Stop()
-
-	node := FormulaNode{
-		name:    KeyOriginalF,
-		deps:    []string{KeyActualF},
-		formula: func(m MomentData, prev map[string]Result) float64 { return 0 },
-	}
-	nodes := []Node{&node}
-
-	key := "node_slice_key"
-	ttl := 1 * time.Second
-
-	err := cache.Set(key, nodes, ttl)
-	if err != nil {
-		t.Fatalf("Set failed: %v", err)
-	}
-
-	got, found := cache.Get(key)
-	if !found {
-		t.Fatal("Get: node slice not found")
-	}
-	gotNodes := got.([]Node)
-	if len(gotNodes) != len(nodes) {
-		t.Fatalf("Expected %d nodes, got %d", len(nodes), len(gotNodes))
-	}
-	if gotNodes[0].Name() != node.Name() {
-		t.Fatalf("Expected node name %s, got %s", node.Name(), gotNodes[0].Name())
-	}
-}
-
-// TestCalcTemplate_TopoSort 测试拓扑排序
-func TestCalcTemplate_TopoSort(t *testing.T) {
-	node1 := FormulaNode{
+// 原电费
+func TestCalc_OriginalFe(t *testing.T) {
+	template := NewCalcTemplate(FormulaNode{
 		name: KeyOriginalF,
-		deps: []string{KeyActualF},
-		formula: func(m MomentData, prev map[string]Result) float64 {
-			return prev[KeyActualF].Value
+		deps: []string{KeyLongTermF, KeyDADevF, KeyRTDevF},
+		formula: func(m MomentData, prev map[string]interface{}) (float64, error) {
+			// 检查依赖字段
+			if m.LongTermF == nil {
+				return 0, fmt.Errorf("field LongTermF is not set")
+			}
+			if m.DADevF == nil {
+				return 0, fmt.Errorf("field DADevF is not set")
+			}
+			if m.RTDevF == nil {
+				return 0, fmt.Errorf("field RTDevF is not set")
+			}
+			result := float64(*prev[KeyLongTermF].(Result).F) +
+				float64(*prev[KeyDADevF].(Result).F) +
+				float64(*prev[KeyRTDevF].(Result).F)
+			return result, nil
 		},
-	}
-	node2 := FormulaNode{
-		name: KeyDeviationSettle,
-		deps: []string{KeyOriginalF, KeyDADevF},
-		formula: func(m MomentData, prev map[string]Result) float64 {
-			return prev[KeyOriginalF].Value + prev[KeyDADevF].Value
-		},
+	})
+
+	md := MomentData{
+		LongTermF: NewOptionalFloat(5),
+		DADevF:    NewOptionalFloat(5),
+		RTDevF:    NewOptionalFloat(5),
 	}
 
-	template := NewCalcTemplate(&node1, &node2)
-	ordered, err := template.GetOrderedNodes()
+	data, err := md.Calc(template, true)
 	if err != nil {
-		t.Fatalf("topoSortTemplate failed: %v", err)
+		t.Fatal(err)
+	}
+	for k, v := range data {
+		t.Logf("key %s value %v", k, v)
+	}
+}
+
+// 总电费
+func TestCalc_KeyTotalFee(t *testing.T) {
+	template := NewCalcTemplate(FormulaNode{
+		name: KeyTotalFee,
+		deps: []string{KeyOriginalF, KeyDeviationSettle},
+		formula: func(m MomentData, prev map[string]interface{}) (float64, error) {
+			return prev[KeyOriginalF].(float64) + prev[KeyDeviationSettle].(float64), nil
+		},
+	})
+
+	md := MomentData{
+		TotalQ:    NewOptionalFloat(30),
+		LongTermQ: NewOptionalFloat(5),
+		DADevQ:    NewOptionalFloat(5),
+		DADevP:    NewOptionalFloat(38),
+		RTDevP:    NewOptionalFloat(35),
+		LongTermF: NewOptionalFloat(5),
+		DADevF:    NewOptionalFloat(5),
+		RTDevF:    NewOptionalFloat(5),
 	}
 
-	// 检查排序顺序
-	baseNodes := []string{KeyActualF, KeyDADevF, KeyLongTermF, KeyRTDevF, KeyTotalF, KeyTransferF}
-	expectedOrder := append(baseNodes, KeyOriginalF, KeyDeviationSettle)
-	if len(ordered) != len(expectedOrder) {
-		t.Fatalf("Expected %d nodes, got %d", len(expectedOrder), len(ordered))
+	data, err := md.Calc(template, true)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for i, node := range ordered {
-		if node.Name() != expectedOrder[i] {
-			t.Errorf("Expected node %s at position %d, got %s", expectedOrder[i], i, node.Name())
+	for k, v := range data {
+		t.Logf("key %s value %v", k, v)
+	}
+}
+
+// 偏差结算费用
+func TestCalc_DeviationSettle(t *testing.T) {
+	f, _ := formulaRegistry[KeyDeviationSettle]
+	template := NewCalcTemplate(f)
+
+	t.Run("偏差结算费用 日前大于实时", func(t *testing.T) {
+		md := MomentData{
+			TotalQ:    NewOptionalFloat(30),
+			LongTermQ: NewOptionalFloat(5),
+			DADevQ:    NewOptionalFloat(5),
+			ActualQ:   NewOptionalFloat(10),
+			DADevP:    NewOptionalFloat(38),
+			RTDevP:    NewOptionalFloat(35),
+			LongTermF: NewOptionalFloat(5),
+			DADevF:    NewOptionalFloat(5),
+			RTDevF:    NewOptionalFloat(5),
+			ActualF:   NewOptionalFloat(5),
 		}
-	}
-}
 
-// TestCalcTemplate_Cache 测试缓存命中
-func TestCalcTemplate_Cache(t *testing.T) {
-	node := FormulaNode{
-		name: KeyOriginalF,
-		deps: []string{KeyActualF},
-		formula: func(m MomentData, prev map[string]Result) float64 {
-			return prev[KeyActualF].Value
-		},
-	}
-	template := NewCalcTemplate(&node)
-
-	ordered1, err := template.GetOrderedNodes()
-	if err != nil {
-		t.Fatalf("GetOrderedNodes failed: %v", err)
-	}
-
-	ordered2, err := template.GetOrderedNodes()
-	if err != nil {
-		t.Fatalf("GetOrderedNodes failed: %v", err)
-	}
-
-	if !reflect.DeepEqual(ordered1, ordered2) {
-		t.Fatal("Cached order differs from computed order")
-	}
-}
-
-// TestMomentData_Calc 测试单次计算
-func TestMomentData_Calc(t *testing.T) {
-	node := FormulaNode{
-		name: KeyOriginalF,
-		deps: []string{KeyActualF},
-		formula: func(m MomentData, prev map[string]Result) float64 {
-			return prev[KeyActualF].Value * 2
-		},
-	}
-	template := NewCalcTemplate(&node)
-
-	data := MomentData{
-		Period:  1,
-		ActualF: 100.0,
-	}
-
-	results, err := data.Calc(template)
-	if err != nil {
-		t.Fatalf("Calc failed: %v", err)
-	}
-
-	if val, ok := results[KeyActualF]; !ok || val.Value != 100.0 {
-		t.Errorf("Expected ActualF=100.0, got %v", val.Value)
-	}
-	if val, ok := results[KeyOriginalF]; !ok || val.Value != 200.0 {
-		t.Errorf("Expected OriginalF=200.0, got %v", val.Value)
-	}
-}
-
-// TestCalcBatch 测试批量并发计算
-func TestCalcBatch(t *testing.T) {
-	node := FormulaNode{
-		name: KeyOriginalF,
-		deps: []string{KeyActualF},
-		formula: func(m MomentData, prev map[string]Result) float64 {
-			return prev[KeyActualF].Value * 2
-		},
-	}
-	template := NewCalcTemplate(&node)
-
-	dataList := []MomentData{
-		{Period: 1, ActualF: 100.0},
-		{Period: 2, ActualF: 200.0},
-	}
-	templates := []*CalcTemplate{template, template}
-
-	results, errors := CalcBatch(dataList, templates)
-	if len(errors) != 2 {
-		t.Fatalf("Expected 2 errors, got %d", len(errors))
-	}
-	for i, err := range errors {
+		data, err := md.Calc(template, true)
 		if err != nil {
-			t.Errorf("CalcBatch error at index %d: %v", i, err)
+			t.Fatal(err)
 		}
+		for k, v := range data {
+			t.Logf("key %s value %v", k, v)
+		}
+	})
+
+	t.Run("偏差结算费用 日前小于实时", func(t *testing.T) {
+		md := MomentData{
+			TotalQ:    NewOptionalFloat(30),
+			LongTermQ: NewOptionalFloat(5),
+			DADevQ:    NewOptionalFloat(5),
+			ActualQ:   NewOptionalFloat(3),
+			DADevP:    NewOptionalFloat(30),
+			RTDevP:    NewOptionalFloat(35),
+			LongTermF: NewOptionalFloat(5),
+			DADevF:    NewOptionalFloat(5),
+			RTDevF:    NewOptionalFloat(5),
+			ActualF:   NewOptionalFloat(5),
+		}
+
+		data, err := md.Calc(template, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range data {
+			t.Logf("key %s value %v", k, v)
+		}
+	})
+}
+
+// 偏差收益
+func TestCalc_KeyDeviationProfit(t *testing.T) {
+	f, _ := formulaRegistry[KeyDeviationProfit]
+	template := NewCalcTemplate(f)
+
+	t.Run("偏差结算费用 日前大于实时", func(t *testing.T) {
+		md := MomentData{
+			TotalQ:    NewOptionalFloat(5),
+			LongTermQ: NewOptionalFloat(5),
+			DADevQ:    NewOptionalFloat(5),
+			ActualQ:   NewOptionalFloat(10),
+			DADevP:    NewOptionalFloat(38),
+			RTDevP:    NewOptionalFloat(35),
+			LongTermF: NewOptionalFloat(5),
+			DADevF:    NewOptionalFloat(5),
+			RTDevF:    NewOptionalFloat(5),
+			ActualF:   NewOptionalFloat(5),
+		}
+
+		data, err := md.Calc(template, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range data {
+			t.Logf("key %s value %v", k, v)
+		}
+	})
+
+	t.Run("偏差结算费用 日前小于实时", func(t *testing.T) {
+		md := MomentData{
+			TotalQ:    NewOptionalFloat(30),
+			LongTermQ: NewOptionalFloat(5),
+			DADevQ:    NewOptionalFloat(5),
+			ActualQ:   NewOptionalFloat(3),
+			DADevP:    NewOptionalFloat(30),
+			RTDevP:    NewOptionalFloat(35),
+			LongTermF: NewOptionalFloat(5),
+			DADevF:    NewOptionalFloat(5),
+			RTDevF:    NewOptionalFloat(5),
+			ActualF:   NewOptionalFloat(5),
+		}
+
+		data, err := md.Calc(template, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range data {
+			t.Logf("key %s value %v", k, v)
+		}
+	})
+}
+
+// 最终收益
+func TestCalc_FinalProfit(t *testing.T) {
+	f, _ := formulaRegistry[KeyFinalProfit]
+	template := NewCalcTemplate(f)
+
+	t.Run("最终收益 日前大于实时", func(t *testing.T) {
+		md := MomentData{
+			TotalQ:    NewOptionalFloat(5),
+			LongTermQ: NewOptionalFloat(5),
+			DADevQ:    NewOptionalFloat(5),
+			ActualQ:   NewOptionalFloat(10),
+			DADevP:    NewOptionalFloat(38),
+			RTDevP:    NewOptionalFloat(35),
+			LongTermF: NewOptionalFloat(5),
+			DADevF:    NewOptionalFloat(5),
+			RTDevF:    NewOptionalFloat(5),
+			ActualF:   NewOptionalFloat(5),
+		}
+
+		data, err := md.Calc(template, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range data {
+			t.Logf("key %s value %v", k, v)
+		}
+	})
+
+	t.Run("最终收益 日前小于实时", func(t *testing.T) {
+		md := MomentData{
+			TotalQ:    NewOptionalFloat(30),
+			LongTermQ: NewOptionalFloat(5),
+			DADevQ:    NewOptionalFloat(5),
+			ActualQ:   NewOptionalFloat(3),
+			DADevP:    NewOptionalFloat(30),
+			RTDevP:    NewOptionalFloat(35),
+			LongTermF: NewOptionalFloat(5),
+			DADevF:    NewOptionalFloat(5),
+			RTDevF:    NewOptionalFloat(5),
+			ActualF:   NewOptionalFloat(5),
+		}
+
+		data, err := md.Calc(template, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range data {
+			t.Logf("key %s value %v", k, v)
+		}
+	})
+}
+
+// 套利
+func TestCalc_Arbitrage(t *testing.T) {
+	f, _ := formulaRegistry[KeyArbitrage]
+	template := NewCalcTemplate(f)
+
+	t.Run("套利 日前大于实时", func(t *testing.T) {
+		md := MomentData{
+			TotalQ:    NewOptionalFloat(5),
+			LongTermQ: NewOptionalFloat(5),
+			DADevQ:    NewOptionalFloat(5),
+			ActualQ:   NewOptionalFloat(10),
+			DADevP:    NewOptionalFloat(38),
+			RTDevP:    NewOptionalFloat(35),
+			LongTermF: NewOptionalFloat(5),
+			DADevF:    NewOptionalFloat(5),
+			RTDevF:    NewOptionalFloat(5),
+			ActualF:   NewOptionalFloat(5),
+		}
+
+		data, err := md.Calc(template, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range data {
+			t.Logf("key %s value %v", k, v)
+		}
+	})
+
+	t.Run("套利 日前小于实时", func(t *testing.T) {
+		md := MomentData{
+			TotalQ:    NewOptionalFloat(30),
+			LongTermQ: NewOptionalFloat(5),
+			DADevQ:    NewOptionalFloat(5),
+			ActualQ:   NewOptionalFloat(3),
+			DADevP:    NewOptionalFloat(30),
+			RTDevP:    NewOptionalFloat(35),
+			LongTermF: NewOptionalFloat(5),
+			DADevF:    NewOptionalFloat(5),
+			RTDevF:    NewOptionalFloat(5),
+			ActualF:   NewOptionalFloat(5),
+		}
+
+		data, err := md.Calc(template, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range data {
+			t.Logf("key %s value %v", k, v)
+		}
+	})
+}
+
+// 单元测试
+func Test_excel(t *testing.T) {
+	// 定义三个时刻的测试数据
+	dataSets := []struct {
+		Period int
+		Data   MomentData
+	}{
+		{
+			Period: 3,
+			Data: MomentData{
+				Period:    3,
+				ActualQ:   NewOptionalFloat(0.06),
+				ActualP:   nil,
+				ActualF:   nil,
+				TotalQ:    NewOptionalFloat(0.06),
+				TotalP:    NewOptionalFloat(308.04681),
+				TotalF:    NewOptionalFloat(18.4828086),
+				LongTermQ: NewOptionalFloat(0.006),
+				LongTermP: NewOptionalFloat(372),
+				LongTermF: NewOptionalFloat(2.232),
+				DADevQ:    NewOptionalFloat(0.0241),
+				DADevP:    NewOptionalFloat(325.1897),
+				DADevF:    NewOptionalFloat(7.83707177),
+				RTDevQ:    NewOptionalFloat(0.0299),
+				RTDevP:    NewOptionalFloat(216.0701),
+				RTDevF:    NewOptionalFloat(6.46049599),
+				TransferQ: NewOptionalFloat(0),
+				TransferP: NewOptionalFloat(0),
+				TransferF: NewOptionalFloat(1.95324084),
+			},
+		},
+		{
+			Period: 4,
+			Data: MomentData{
+				Period:    4,
+				ActualQ:   NewOptionalFloat(0.06),
+				ActualP:   nil,
+				ActualF:   nil,
+				TotalQ:    NewOptionalFloat(0.06),
+				TotalP:    NewOptionalFloat(310.38966),
+				TotalF:    NewOptionalFloat(18.6233796),
+				LongTermQ: NewOptionalFloat(0.006),
+				LongTermP: NewOptionalFloat(372),
+				LongTermF: NewOptionalFloat(2.232),
+				DADevQ:    NewOptionalFloat(0.0241),
+				DADevP:    NewOptionalFloat(311.2202),
+				DADevF:    NewOptionalFloat(7.50040682),
+				RTDevQ:    NewOptionalFloat(0.0299),
+				RTDevP:    NewOptionalFloat(276.6776),
+				RTDevF:    NewOptionalFloat(8.27266024),
+				TransferQ: NewOptionalFloat(0),
+				TransferP: NewOptionalFloat(0),
+				TransferF: NewOptionalFloat(0.61831254),
+			},
+		},
+		{
+			Period: 5,
+			Data: MomentData{
+				Period:    5,
+				ActualQ:   NewOptionalFloat(0.47),
+				ActualP:   nil,
+				ActualF:   nil,
+				TotalQ:    NewOptionalFloat(0.47),
+				TotalP:    NewOptionalFloat(313.3031),
+				TotalF:    NewOptionalFloat(18.798186),
+				LongTermQ: NewOptionalFloat(0.006),
+				LongTermP: NewOptionalFloat(372),
+				LongTermF: NewOptionalFloat(2.232),
+				DADevQ:    NewOptionalFloat(0.37),
+				DADevP:    NewOptionalFloat(315.7922),
+				DADevF:    NewOptionalFloat(116.843114),
+				RTDevQ:    NewOptionalFloat(0.09),
+				RTDevP:    NewOptionalFloat(320.7428),
+				RTDevF:    NewOptionalFloat(28.866852),
+				TransferQ: NewOptionalFloat(0),
+				TransferP: NewOptionalFloat(0),
+				TransferF: NewOptionalFloat(0.16198426),
+			},
+		},
 	}
 
-	if val := results[0][KeyOriginalF].Value; val != 200.0 {
-		t.Errorf("Expected OriginalF=200.0, got %v", val)
-	}
-	if val := results[1][KeyOriginalF].Value; val != 400.0 {
-		t.Errorf("Expected OriginalF=400.0, got %v", val)
+	// 创建计算模板
+	template := NewFullCalcTemplate()
+
+	// 遍历每个时刻的数据进行计算
+	for _, ds := range dataSets {
+		data, err := ds.Data.Calc(template, false)
+		if err != nil {
+			t.Fatalf("时刻 %d 计算失败: %v", ds.Period, err)
+		}
+
+		// 按固定顺序打印结果，确保日志清晰
+		keys := []string{KeyOriginalF, KeyDeviationSettle, KeyDeviationProfit, KeyTotalFee, KeyFinalProfit, KeyArbitrage}
+		for _, key := range keys {
+			if v, ok := data[key]; ok {
+				// 格式化输出，保留 6 位小数以保持一致性
+				t.Logf("时刻 %d %s: %g", ds.Period, key, v)
+			} else {
+				t.Logf("时刻 %d %s: <not found>", ds.Period, key)
+			}
+		}
+		t.Log()
 	}
 }
 
-// TestTTLCache_ConcurrentAccess 测试并发读写
-func TestTTLCache_ConcurrentAccess(t *testing.T) {
-	cache := NewTTLCache()
-	defer cache.Stop()
+func Test_dec(t *testing.T) {
+	f, _ := decimal.NewFromFloat(2.232).
+		Add(decimal.NewFromFloat(7.83707177)).
+		Add(decimal.NewFromFloat(6.46049599)).
+		Float64()
+	t.Log("结果1 ", f)
 
-	var wg sync.WaitGroup
-	key := "concurrent_key"
-	value := "concurrent_value"
-	ttl := 5 * time.Second
-
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			err := cache.Set(key, value, ttl)
-			if err != nil {
-				t.Errorf("Concurrent Set failed: %v", err)
-			}
-		}()
-	}
-	wg.Wait()
-
-	for i := 0; i < 100; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, found := cache.Get(key)
-			if !found {
-				t.Error("Concurrent Get: value not found")
-			}
-		}()
-	}
-	wg.Wait()
+	f2 := utils.DecimalAdd(2.232, 7.83707177, 6.46049599)
+	//f2, _ := decimal.NewFromFloat(2.232).
+	//	Add(decimal.NewFromFloat(7.83707177)).
+	//	Add(decimal.NewFromFloat(6.46049599)).
+	//	Float64()
+	t.Log("结果2 ", f2)
 }
