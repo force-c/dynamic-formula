@@ -8,36 +8,33 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// 原电费
-func TestCalc_OriginalFe(t *testing.T) {
+func TestCalc_BaseCost(t *testing.T) {
 	template := NewCalcTemplate(FormulaNode{
-		name: KeyOriginalF,
-		deps: []string{KeyLongTermF, KeyDADevF, KeyRTDevF},
-		formula: func(m MomentData, prev map[string]interface{}) (float64, error) {
-			// 检查依赖字段
-			if m.LongTermF == nil {
-				return 0, fmt.Errorf("field LongTermF is not set")
+		name: KeyBaseCost,
+		deps: []string{KeyBaselineMetrics, KeyScenarioAInputs, KeyScenarioBInputs},
+		formula: func(m ContextInput, prev map[string]interface{}) (float64, error) {
+			if m.BaselineV == nil {
+				return 0, fmt.Errorf("context.BaselineV is nil")
 			}
-			if m.DADevF == nil {
-				return 0, fmt.Errorf("field DADevF is not set")
+			if m.ScenarioAV == nil {
+				return 0, fmt.Errorf("context.ScenarioAV is nil")
 			}
-			if m.RTDevF == nil {
-				return 0, fmt.Errorf("field RTDevF is not set")
+			if m.ScenarioBV == nil {
+				return 0, fmt.Errorf("context.ScenarioBV is nil")
 			}
-			result := float64(*prev[KeyLongTermF].(Result).F) +
-				float64(*prev[KeyDADevF].(Result).F) +
-				float64(*prev[KeyRTDevF].(Result).F)
-			return result, nil
+			return float64(*prev[KeyBaselineMetrics].(Result).V) +
+				float64(*prev[KeyScenarioAInputs].(Result).V) +
+				float64(*prev[KeyScenarioBInputs].(Result).V), nil
 		},
 	})
 
-	md := MomentData{
-		LongTermF: NewOptionalFloat(5),
-		DADevF:    NewOptionalFloat(5),
-		RTDevF:    NewOptionalFloat(5),
+	input := ContextInput{
+		BaselineV:  NewOptionalFloat(10),
+		ScenarioAV: NewOptionalFloat(5),
+		ScenarioBV: NewOptionalFloat(2),
 	}
 
-	data, err := md.Calc(template, true)
+	data, err := input.Calc(template, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,28 +43,28 @@ func TestCalc_OriginalFe(t *testing.T) {
 	}
 }
 
-// 总电费
-func TestCalc_KeyTotalFee(t *testing.T) {
+func TestCalc_TotalCost(t *testing.T) {
 	template := NewCalcTemplate(FormulaNode{
-		name: KeyTotalFee,
-		deps: []string{KeyOriginalF, KeyDeviationSettle},
-		formula: func(m MomentData, prev map[string]interface{}) (float64, error) {
-			return prev[KeyOriginalF].(float64) + prev[KeyDeviationSettle].(float64), nil
+		name: KeyTotalCost,
+		deps: []string{KeyBaseCost, KeySettlementImpact},
+		formula: func(m ContextInput, prev map[string]interface{}) (float64, error) {
+			return prev[KeyBaseCost].(float64) + prev[KeySettlementImpact].(float64), nil
 		},
 	})
 
-	md := MomentData{
-		TotalQ:    NewOptionalFloat(30),
-		LongTermQ: NewOptionalFloat(5),
-		DADevQ:    NewOptionalFloat(5),
-		DADevP:    NewOptionalFloat(38),
-		RTDevP:    NewOptionalFloat(35),
-		LongTermF: NewOptionalFloat(5),
-		DADevF:    NewOptionalFloat(5),
-		RTDevF:    NewOptionalFloat(5),
+	input := ContextInput{
+		AggregateQ: NewOptionalFloat(30),
+		BaselineQ:  NewOptionalFloat(8),
+		ScenarioAQ: NewOptionalFloat(4),
+		ObservedQ:  NewOptionalFloat(12),
+		ScenarioAP: NewOptionalFloat(20),
+		ScenarioBP: NewOptionalFloat(18),
+		BaselineV:  NewOptionalFloat(9),
+		ScenarioAV: NewOptionalFloat(3),
+		ScenarioBV: NewOptionalFloat(2),
 	}
 
-	data, err := md.Calc(template, true)
+	data, err := input.Calc(template, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,26 +73,25 @@ func TestCalc_KeyTotalFee(t *testing.T) {
 	}
 }
 
-// 偏差结算费用
-func TestCalc_DeviationSettle(t *testing.T) {
-	f, _ := formulaRegistry[KeyDeviationSettle]
+func TestCalc_SettlementImpact(t *testing.T) {
+	f, _ := formulaRegistry[KeySettlementImpact]
 	template := NewCalcTemplate(f)
 
-	t.Run("偏差结算费用 日前大于实时", func(t *testing.T) {
-		md := MomentData{
-			TotalQ:    NewOptionalFloat(30),
-			LongTermQ: NewOptionalFloat(5),
-			DADevQ:    NewOptionalFloat(5),
-			ActualQ:   NewOptionalFloat(10),
-			DADevP:    NewOptionalFloat(38),
-			RTDevP:    NewOptionalFloat(35),
-			LongTermF: NewOptionalFloat(5),
-			DADevF:    NewOptionalFloat(5),
-			RTDevF:    NewOptionalFloat(5),
-			ActualF:   NewOptionalFloat(5),
+	t.Run("scenario A price higher", func(t *testing.T) {
+		input := ContextInput{
+			AggregateQ: NewOptionalFloat(24),
+			BaselineQ:  NewOptionalFloat(6),
+			ScenarioAQ: NewOptionalFloat(5),
+			ObservedQ:  NewOptionalFloat(7),
+			ScenarioAP: NewOptionalFloat(22),
+			ScenarioBP: NewOptionalFloat(18),
+			BaselineV:  NewOptionalFloat(6),
+			ScenarioAV: NewOptionalFloat(3),
+			ScenarioBV: NewOptionalFloat(4),
+			ObservedV:  NewOptionalFloat(5),
 		}
 
-		data, err := md.Calc(template, true)
+		data, err := input.Calc(template, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -104,21 +100,21 @@ func TestCalc_DeviationSettle(t *testing.T) {
 		}
 	})
 
-	t.Run("偏差结算费用 日前小于实时", func(t *testing.T) {
-		md := MomentData{
-			TotalQ:    NewOptionalFloat(30),
-			LongTermQ: NewOptionalFloat(5),
-			DADevQ:    NewOptionalFloat(5),
-			ActualQ:   NewOptionalFloat(3),
-			DADevP:    NewOptionalFloat(30),
-			RTDevP:    NewOptionalFloat(35),
-			LongTermF: NewOptionalFloat(5),
-			DADevF:    NewOptionalFloat(5),
-			RTDevF:    NewOptionalFloat(5),
-			ActualF:   NewOptionalFloat(5),
+	t.Run("scenario B price higher", func(t *testing.T) {
+		input := ContextInput{
+			AggregateQ: NewOptionalFloat(24),
+			BaselineQ:  NewOptionalFloat(6),
+			ScenarioAQ: NewOptionalFloat(5),
+			ObservedQ:  NewOptionalFloat(9),
+			ScenarioAP: NewOptionalFloat(18),
+			ScenarioBP: NewOptionalFloat(22),
+			BaselineV:  NewOptionalFloat(6),
+			ScenarioAV: NewOptionalFloat(3),
+			ScenarioBV: NewOptionalFloat(4),
+			ObservedV:  NewOptionalFloat(5),
 		}
 
-		data, err := md.Calc(template, true)
+		data, err := input.Calc(template, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -128,26 +124,25 @@ func TestCalc_DeviationSettle(t *testing.T) {
 	})
 }
 
-// 偏差收益
-func TestCalc_KeyDeviationProfit(t *testing.T) {
-	f, _ := formulaRegistry[KeyDeviationProfit]
+func TestCalc_ScenarioMargin(t *testing.T) {
+	f, _ := formulaRegistry[KeyScenarioMargin]
 	template := NewCalcTemplate(f)
 
-	t.Run("偏差结算费用 日前大于实时", func(t *testing.T) {
-		md := MomentData{
-			TotalQ:    NewOptionalFloat(5),
-			LongTermQ: NewOptionalFloat(5),
-			DADevQ:    NewOptionalFloat(5),
-			ActualQ:   NewOptionalFloat(10),
-			DADevP:    NewOptionalFloat(38),
-			RTDevP:    NewOptionalFloat(35),
-			LongTermF: NewOptionalFloat(5),
-			DADevF:    NewOptionalFloat(5),
-			RTDevF:    NewOptionalFloat(5),
-			ActualF:   NewOptionalFloat(5),
+	t.Run("scenario A price higher", func(t *testing.T) {
+		input := ContextInput{
+			AggregateQ: NewOptionalFloat(12),
+			BaselineQ:  NewOptionalFloat(3),
+			ScenarioAQ: NewOptionalFloat(4),
+			ObservedQ:  NewOptionalFloat(6),
+			ScenarioAP: NewOptionalFloat(25),
+			ScenarioBP: NewOptionalFloat(21),
+			BaselineV:  NewOptionalFloat(6),
+			ScenarioAV: NewOptionalFloat(3),
+			ScenarioBV: NewOptionalFloat(4),
+			ObservedV:  NewOptionalFloat(5),
 		}
 
-		data, err := md.Calc(template, true)
+		data, err := input.Calc(template, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -156,21 +151,21 @@ func TestCalc_KeyDeviationProfit(t *testing.T) {
 		}
 	})
 
-	t.Run("偏差结算费用 日前小于实时", func(t *testing.T) {
-		md := MomentData{
-			TotalQ:    NewOptionalFloat(30),
-			LongTermQ: NewOptionalFloat(5),
-			DADevQ:    NewOptionalFloat(5),
-			ActualQ:   NewOptionalFloat(3),
-			DADevP:    NewOptionalFloat(30),
-			RTDevP:    NewOptionalFloat(35),
-			LongTermF: NewOptionalFloat(5),
-			DADevF:    NewOptionalFloat(5),
-			RTDevF:    NewOptionalFloat(5),
-			ActualF:   NewOptionalFloat(5),
+	t.Run("scenario B price higher", func(t *testing.T) {
+		input := ContextInput{
+			AggregateQ: NewOptionalFloat(12),
+			BaselineQ:  NewOptionalFloat(3),
+			ScenarioAQ: NewOptionalFloat(4),
+			ObservedQ:  NewOptionalFloat(2),
+			ScenarioAP: NewOptionalFloat(18),
+			ScenarioBP: NewOptionalFloat(22),
+			BaselineV:  NewOptionalFloat(6),
+			ScenarioAV: NewOptionalFloat(3),
+			ScenarioBV: NewOptionalFloat(4),
+			ObservedV:  NewOptionalFloat(5),
 		}
 
-		data, err := md.Calc(template, true)
+		data, err := input.Calc(template, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -180,26 +175,25 @@ func TestCalc_KeyDeviationProfit(t *testing.T) {
 	})
 }
 
-// 最终收益
-func TestCalc_FinalProfit(t *testing.T) {
-	f, _ := formulaRegistry[KeyFinalProfit]
+func TestCalc_NetMargin(t *testing.T) {
+	f, _ := formulaRegistry[KeyNetMargin]
 	template := NewCalcTemplate(f)
 
-	t.Run("最终收益 日前大于实时", func(t *testing.T) {
-		md := MomentData{
-			TotalQ:    NewOptionalFloat(5),
-			LongTermQ: NewOptionalFloat(5),
-			DADevQ:    NewOptionalFloat(5),
-			ActualQ:   NewOptionalFloat(10),
-			DADevP:    NewOptionalFloat(38),
-			RTDevP:    NewOptionalFloat(35),
-			LongTermF: NewOptionalFloat(5),
-			DADevF:    NewOptionalFloat(5),
-			RTDevF:    NewOptionalFloat(5),
-			ActualF:   NewOptionalFloat(5),
+	t.Run("scenario A price higher", func(t *testing.T) {
+		input := ContextInput{
+			AggregateQ: NewOptionalFloat(14),
+			BaselineQ:  NewOptionalFloat(4),
+			ScenarioAQ: NewOptionalFloat(3),
+			ObservedQ:  NewOptionalFloat(6),
+			ScenarioAP: NewOptionalFloat(25),
+			ScenarioBP: NewOptionalFloat(21),
+			BaselineV:  NewOptionalFloat(6),
+			ScenarioAV: NewOptionalFloat(3),
+			ScenarioBV: NewOptionalFloat(4),
+			ObservedV:  NewOptionalFloat(5),
 		}
 
-		data, err := md.Calc(template, true)
+		data, err := input.Calc(template, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -208,21 +202,21 @@ func TestCalc_FinalProfit(t *testing.T) {
 		}
 	})
 
-	t.Run("最终收益 日前小于实时", func(t *testing.T) {
-		md := MomentData{
-			TotalQ:    NewOptionalFloat(30),
-			LongTermQ: NewOptionalFloat(5),
-			DADevQ:    NewOptionalFloat(5),
-			ActualQ:   NewOptionalFloat(3),
-			DADevP:    NewOptionalFloat(30),
-			RTDevP:    NewOptionalFloat(35),
-			LongTermF: NewOptionalFloat(5),
-			DADevF:    NewOptionalFloat(5),
-			RTDevF:    NewOptionalFloat(5),
-			ActualF:   NewOptionalFloat(5),
+	t.Run("scenario B price higher", func(t *testing.T) {
+		input := ContextInput{
+			AggregateQ: NewOptionalFloat(14),
+			BaselineQ:  NewOptionalFloat(4),
+			ScenarioAQ: NewOptionalFloat(3),
+			ObservedQ:  NewOptionalFloat(2),
+			ScenarioAP: NewOptionalFloat(18),
+			ScenarioBP: NewOptionalFloat(22),
+			BaselineV:  NewOptionalFloat(6),
+			ScenarioAV: NewOptionalFloat(3),
+			ScenarioBV: NewOptionalFloat(4),
+			ObservedV:  NewOptionalFloat(5),
 		}
 
-		data, err := md.Calc(template, true)
+		data, err := input.Calc(template, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -232,26 +226,25 @@ func TestCalc_FinalProfit(t *testing.T) {
 	})
 }
 
-// 套利
-func TestCalc_Arbitrage(t *testing.T) {
-	f, _ := formulaRegistry[KeyArbitrage]
+func TestCalc_UnitYield(t *testing.T) {
+	f, _ := formulaRegistry[KeyUnitYield]
 	template := NewCalcTemplate(f)
 
-	t.Run("套利 日前大于实时", func(t *testing.T) {
-		md := MomentData{
-			TotalQ:    NewOptionalFloat(5),
-			LongTermQ: NewOptionalFloat(5),
-			DADevQ:    NewOptionalFloat(5),
-			ActualQ:   NewOptionalFloat(10),
-			DADevP:    NewOptionalFloat(38),
-			RTDevP:    NewOptionalFloat(35),
-			LongTermF: NewOptionalFloat(5),
-			DADevF:    NewOptionalFloat(5),
-			RTDevF:    NewOptionalFloat(5),
-			ActualF:   NewOptionalFloat(5),
+	t.Run("non-zero aggregate quantity", func(t *testing.T) {
+		input := ContextInput{
+			AggregateQ: NewOptionalFloat(16),
+			BaselineQ:  NewOptionalFloat(5),
+			ScenarioAQ: NewOptionalFloat(4),
+			ObservedQ:  NewOptionalFloat(2),
+			ScenarioAP: NewOptionalFloat(18),
+			ScenarioBP: NewOptionalFloat(21),
+			BaselineV:  NewOptionalFloat(6),
+			ScenarioAV: NewOptionalFloat(3),
+			ScenarioBV: NewOptionalFloat(4),
+			ObservedV:  NewOptionalFloat(5),
 		}
 
-		data, err := md.Calc(template, true)
+		data, err := input.Calc(template, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -260,21 +253,21 @@ func TestCalc_Arbitrage(t *testing.T) {
 		}
 	})
 
-	t.Run("套利 日前小于实时", func(t *testing.T) {
-		md := MomentData{
-			TotalQ:    NewOptionalFloat(30),
-			LongTermQ: NewOptionalFloat(5),
-			DADevQ:    NewOptionalFloat(5),
-			ActualQ:   NewOptionalFloat(3),
-			DADevP:    NewOptionalFloat(30),
-			RTDevP:    NewOptionalFloat(35),
-			LongTermF: NewOptionalFloat(5),
-			DADevF:    NewOptionalFloat(5),
-			RTDevF:    NewOptionalFloat(5),
-			ActualF:   NewOptionalFloat(5),
+	t.Run("zero aggregate quantity", func(t *testing.T) {
+		input := ContextInput{
+			AggregateQ: NewOptionalFloat(0),
+			BaselineQ:  NewOptionalFloat(5),
+			ScenarioAQ: NewOptionalFloat(4),
+			ObservedQ:  NewOptionalFloat(2),
+			ScenarioAP: NewOptionalFloat(18),
+			ScenarioBP: NewOptionalFloat(21),
+			BaselineV:  NewOptionalFloat(6),
+			ScenarioAV: NewOptionalFloat(3),
+			ScenarioBV: NewOptionalFloat(4),
+			ObservedV:  NewOptionalFloat(5),
 		}
 
-		data, err := md.Calc(template, true)
+		data, err := input.Calc(template, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -284,122 +277,119 @@ func TestCalc_Arbitrage(t *testing.T) {
 	})
 }
 
-// 单元测试
-func Test_excel(t *testing.T) {
-	// 定义三个时刻的测试数据
+func TestCalc_FullTemplate(t *testing.T) {
 	dataSets := []struct {
 		Period int
-		Data   MomentData
+		Data   ContextInput
 	}{
 		{
+			Period: 1,
+			Data: ContextInput{
+				Period:     1,
+				ObservedQ:  NewOptionalFloat(0.8),
+				ObservedP:  NewOptionalFloat(19.2),
+				ObservedV:  NewOptionalFloat(15.36),
+				AggregateQ: NewOptionalFloat(0.8),
+				AggregateP: NewOptionalFloat(20.0),
+				AggregateV: NewOptionalFloat(16.0),
+				BaselineQ:  NewOptionalFloat(0.2),
+				BaselineP:  NewOptionalFloat(21.5),
+				BaselineV:  NewOptionalFloat(4.3),
+				ScenarioAQ: NewOptionalFloat(0.25),
+				ScenarioAP: NewOptionalFloat(18.5),
+				ScenarioAV: NewOptionalFloat(4.625),
+				ScenarioBQ: NewOptionalFloat(0.35),
+				ScenarioBP: NewOptionalFloat(17.8),
+				ScenarioBV: NewOptionalFloat(6.23),
+				OverheadQ:  NewOptionalFloat(0),
+				OverheadP:  NewOptionalFloat(0),
+				OverheadV:  NewOptionalFloat(0.8),
+			},
+		},
+		{
+			Period: 2,
+			Data: ContextInput{
+				Period:     2,
+				ObservedQ:  NewOptionalFloat(1.1),
+				ObservedP:  NewOptionalFloat(20.5),
+				ObservedV:  NewOptionalFloat(22.55),
+				AggregateQ: NewOptionalFloat(1.1),
+				AggregateP: NewOptionalFloat(19.8),
+				AggregateV: NewOptionalFloat(21.78),
+				BaselineQ:  NewOptionalFloat(0.3),
+				BaselineP:  NewOptionalFloat(22),
+				BaselineV:  NewOptionalFloat(6.6),
+				ScenarioAQ: NewOptionalFloat(0.4),
+				ScenarioAP: NewOptionalFloat(19),
+				ScenarioAV: NewOptionalFloat(7.6),
+				ScenarioBQ: NewOptionalFloat(0.45),
+				ScenarioBP: NewOptionalFloat(18.7),
+				ScenarioBV: NewOptionalFloat(8.415),
+				OverheadQ:  NewOptionalFloat(0),
+				OverheadP:  NewOptionalFloat(0),
+				OverheadV:  NewOptionalFloat(1.1),
+			},
+		},
+		{
 			Period: 3,
-			Data: MomentData{
-				Period:    3,
-				ActualQ:   NewOptionalFloat(0.06),
-				ActualP:   nil,
-				ActualF:   nil,
-				TotalQ:    NewOptionalFloat(0.06),
-				TotalP:    NewOptionalFloat(308.04681),
-				TotalF:    NewOptionalFloat(18.4828086),
-				LongTermQ: NewOptionalFloat(0.006),
-				LongTermP: NewOptionalFloat(372),
-				LongTermF: NewOptionalFloat(2.232),
-				DADevQ:    NewOptionalFloat(0.0241),
-				DADevP:    NewOptionalFloat(325.1897),
-				DADevF:    NewOptionalFloat(7.83707177),
-				RTDevQ:    NewOptionalFloat(0.0299),
-				RTDevP:    NewOptionalFloat(216.0701),
-				RTDevF:    NewOptionalFloat(6.46049599),
-				TransferQ: NewOptionalFloat(0),
-				TransferP: NewOptionalFloat(0),
-				TransferF: NewOptionalFloat(1.95324084),
-			},
-		},
-		{
-			Period: 4,
-			Data: MomentData{
-				Period:    4,
-				ActualQ:   NewOptionalFloat(0.06),
-				ActualP:   nil,
-				ActualF:   nil,
-				TotalQ:    NewOptionalFloat(0.06),
-				TotalP:    NewOptionalFloat(310.38966),
-				TotalF:    NewOptionalFloat(18.6233796),
-				LongTermQ: NewOptionalFloat(0.006),
-				LongTermP: NewOptionalFloat(372),
-				LongTermF: NewOptionalFloat(2.232),
-				DADevQ:    NewOptionalFloat(0.0241),
-				DADevP:    NewOptionalFloat(311.2202),
-				DADevF:    NewOptionalFloat(7.50040682),
-				RTDevQ:    NewOptionalFloat(0.0299),
-				RTDevP:    NewOptionalFloat(276.6776),
-				RTDevF:    NewOptionalFloat(8.27266024),
-				TransferQ: NewOptionalFloat(0),
-				TransferP: NewOptionalFloat(0),
-				TransferF: NewOptionalFloat(0.61831254),
-			},
-		},
-		{
-			Period: 5,
-			Data: MomentData{
-				Period:    5,
-				ActualQ:   NewOptionalFloat(0.47),
-				ActualP:   nil,
-				ActualF:   nil,
-				TotalQ:    NewOptionalFloat(0.47),
-				TotalP:    NewOptionalFloat(313.3031),
-				TotalF:    NewOptionalFloat(18.798186),
-				LongTermQ: NewOptionalFloat(0.006),
-				LongTermP: NewOptionalFloat(372),
-				LongTermF: NewOptionalFloat(2.232),
-				DADevQ:    NewOptionalFloat(0.37),
-				DADevP:    NewOptionalFloat(315.7922),
-				DADevF:    NewOptionalFloat(116.843114),
-				RTDevQ:    NewOptionalFloat(0.09),
-				RTDevP:    NewOptionalFloat(320.7428),
-				RTDevF:    NewOptionalFloat(28.866852),
-				TransferQ: NewOptionalFloat(0),
-				TransferP: NewOptionalFloat(0),
-				TransferF: NewOptionalFloat(0.16198426),
+			Data: ContextInput{
+				Period:     3,
+				ObservedQ:  NewOptionalFloat(0.6),
+				ObservedP:  NewOptionalFloat(18.1),
+				ObservedV:  NewOptionalFloat(10.86),
+				AggregateQ: NewOptionalFloat(0.6),
+				AggregateP: NewOptionalFloat(18.9),
+				AggregateV: NewOptionalFloat(11.34),
+				BaselineQ:  NewOptionalFloat(0.15),
+				BaselineP:  NewOptionalFloat(21.8),
+				BaselineV:  NewOptionalFloat(3.27),
+				ScenarioAQ: NewOptionalFloat(0.22),
+				ScenarioAP: NewOptionalFloat(17.4),
+				ScenarioAV: NewOptionalFloat(3.828),
+				ScenarioBQ: NewOptionalFloat(0.28),
+				ScenarioBP: NewOptionalFloat(18.3),
+				ScenarioBV: NewOptionalFloat(5.124),
+				OverheadQ:  NewOptionalFloat(0),
+				OverheadP:  NewOptionalFloat(0),
+				OverheadV:  NewOptionalFloat(0.6),
 			},
 		},
 	}
 
-	// 创建计算模板
 	template := NewFullCalcTemplate()
 
-	// 遍历每个时刻的数据进行计算
 	for _, ds := range dataSets {
 		data, err := ds.Data.Calc(template, false)
 		if err != nil {
-			t.Fatalf("时刻 %d 计算失败: %v", ds.Period, err)
+			t.Fatalf("period %d evaluation failed: %v", ds.Period, err)
 		}
 
-		// 按固定顺序打印结果，确保日志清晰
-		keys := []string{KeyOriginalF, KeyDeviationSettle, KeyDeviationProfit, KeyTotalFee, KeyFinalProfit, KeyArbitrage}
+		keys := []string{
+			KeyBaseCost,
+			KeySettlementImpact,
+			KeyScenarioMargin,
+			KeyTotalCost,
+			KeyNetMargin,
+			KeyUnitYield,
+		}
 		for _, key := range keys {
 			if v, ok := data[key]; ok {
-				// 格式化输出，保留 6 位小数以保持一致性
-				t.Logf("时刻 %d %s: %g", ds.Period, key, v)
+				t.Logf("period %d %s: %g", ds.Period, key, v)
 			} else {
-				t.Logf("时刻 %d %s: <not found>", ds.Period, key)
+				t.Logf("period %d %s: <not found>", ds.Period, key)
 			}
 		}
 		t.Log()
 	}
 }
 
-func Test_dec(t *testing.T) {
-	f, _ := decimal.NewFromFloat(2.232).
-		Add(decimal.NewFromFloat(7.83707177)).
-		Add(decimal.NewFromFloat(6.46049599)).
+func TestDecimalHelpers(t *testing.T) {
+	sum, _ := decimal.NewFromFloat(2.5).
+		Add(decimal.NewFromFloat(3.75)).
+		Add(decimal.NewFromFloat(1.125)).
 		Float64()
-	t.Log("结果1 ", f)
+	t.Log("decimal sum ", sum)
 
-	f2 := utils.DecimalAdd(2.232, 7.83707177, 6.46049599)
-	//f2, _ := decimal.NewFromFloat(2.232).
-	//	Add(decimal.NewFromFloat(7.83707177)).
-	//	Add(decimal.NewFromFloat(6.46049599)).
-	//	Float64()
-	t.Log("结果2 ", f2)
+	sum2 := utils.DecimalAdd(2.5, 3.75, 1.125)
+	t.Log("helper sum ", sum2)
 }

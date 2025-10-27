@@ -9,113 +9,111 @@ import (
 	"github.com/force-c/dynamic-formula/utils"
 )
 
-// OptionalFloat 是 float64 的别名
+// OptionalFloat 用于包装 float64，可表示缺失值语义。
 type OptionalFloat float64
 
-// NewOptionalFloat 创建 *OptionalFloat
+// NewOptionalFloat 返回 OptionalFloat 指针。
 func NewOptionalFloat(f float64) *OptionalFloat {
 	v := OptionalFloat(f)
 	return &v
 }
 
-// Result 包含 Q, P, F 三个字段
+// Result 封装输入节点产出的 Q/P/V 三元结果。
 type Result struct {
 	Q *OptionalFloat
 	P *OptionalFloat
-	F *OptionalFloat
+	V *OptionalFloat
 }
 
-// MomentData 表示输入数据
-type MomentData struct {
-	Period    int            // 时刻
-	ActualQ   *OptionalFloat // 实际分时电量
-	ActualP   *OptionalFloat // 实际分时电价
-	ActualF   *OptionalFloat // 实际分时电费
-	TotalQ    *OptionalFloat // 合计当期电量
-	TotalP    *OptionalFloat // 合计当期电价
-	TotalF    *OptionalFloat // 合计当期电费
-	LongTermQ *OptionalFloat // 中长期市场变化电量
-	LongTermP *OptionalFloat // 中长期市场变化电价
-	LongTermF *OptionalFloat // 中长期市场变化电费
-	DADevQ    *OptionalFloat // 日前偏差电量
-	DADevP    *OptionalFloat // 日前偏差电价
-	DADevF    *OptionalFloat // 日前偏差电费
-	RTDevQ    *OptionalFloat // 实时偏差电量
-	RTDevP    *OptionalFloat // 实时偏差电价
-	RTDevF    *OptionalFloat // 实时偏差电费
-	TransferQ *OptionalFloat // 传输电量
-	TransferP *OptionalFloat // 传输电价
-	TransferF *OptionalFloat // 传输电费
+// ContextInput 表示单次计算上下文，字段可按场景自由组合。
+type ContextInput struct {
+	Period int
+
+	ObservedQ *OptionalFloat
+	ObservedP *OptionalFloat
+	ObservedV *OptionalFloat
+
+	AggregateQ *OptionalFloat
+	AggregateP *OptionalFloat
+	AggregateV *OptionalFloat
+
+	BaselineQ *OptionalFloat
+	BaselineP *OptionalFloat
+	BaselineV *OptionalFloat
+
+	ScenarioAQ *OptionalFloat
+	ScenarioAP *OptionalFloat
+	ScenarioAV *OptionalFloat
+
+	ScenarioBQ *OptionalFloat
+	ScenarioBP *OptionalFloat
+	ScenarioBV *OptionalFloat
+
+	OverheadQ *OptionalFloat
+	OverheadP *OptionalFloat
+	OverheadV *OptionalFloat
 }
 
-// Node 是计算节点的接口
+// Node 表示计算图中的节点。
 type Node interface {
 	Name() string
 	Requires() []string
-	Compute(m MomentData, done map[string]interface{}) (interface{}, error)
+	Compute(ContextInput, map[string]interface{}) (interface{}, error)
 }
 
-// baseNode 是基础节点
-type baseNode struct {
-	name string
-	f    func(MomentData) (q, p, f *OptionalFloat) // 返回 *OptionalFloat，无 error
+// InputAdapter 将上下文数据转换为标准 Result 结果。
+type InputAdapter func(ContextInput) (q, p, v *OptionalFloat)
+
+type inputNode struct {
+	name    string
+	resolve InputAdapter
 }
 
-func (n baseNode) Name() string {
-	return n.name
+func (n inputNode) Name() string { return n.name }
+
+func (n inputNode) Requires() []string { return nil }
+
+func (n inputNode) Compute(m ContextInput, _ map[string]interface{}) (interface{}, error) {
+	q, p, v := n.resolve(m)
+	return Result{Q: q, P: p, V: v}, nil
 }
 
-func (n baseNode) Requires() []string {
-	return nil
-}
-
-func (n baseNode) Compute(m MomentData, _ map[string]interface{}) (interface{}, error) {
-	q, p, f := n.f(m)
-	return Result{Q: q, P: p, F: f}, nil
-}
-
-// FormulaNode 是公式节点
+// FormulaNode 代表执行自定义公式的计算节点。
 type FormulaNode struct {
 	name    string
 	deps    []string
-	formula func(MomentData, map[string]interface{}) (float64, error)
+	formula func(ContextInput, map[string]interface{}) (float64, error)
 }
 
-func (n FormulaNode) Name() string {
-	return n.name
-}
+func (n FormulaNode) Name() string { return n.name }
 
-func (n FormulaNode) Requires() []string {
-	return n.deps
-}
+func (n FormulaNode) Requires() []string { return n.deps }
 
-func (n FormulaNode) Compute(m MomentData, done map[string]interface{}) (interface{}, error) {
+func (n FormulaNode) Compute(m ContextInput, done map[string]interface{}) (interface{}, error) {
 	return n.formula(m, done)
 }
 
-// CalcTemplate 是计算模板
+// CalcTemplate 保存选定节点与依赖关系。
 type CalcTemplate struct {
 	nodes    []Node
-	registry map[string]Node // 存储节点及其依赖
+	registry map[string]Node
 }
 
-// NewCalcTemplate 创建新模板，收集依赖节点
+// NewCalcTemplate 根据传入节点收集依赖。
 func NewCalcTemplate(nodes ...Node) *CalcTemplate {
 	t := &CalcTemplate{
 		nodes:    nodes,
 		registry: make(map[string]Node),
 	}
 
-	// 收集所有依赖节点
 	required := make(map[string]bool)
 	for _, n := range nodes {
 		collectDependencies(n, required)
 		t.registry[n.Name()] = n
 	}
 
-	// 只添加依赖的基础节点和公式节点
 	for name := range required {
-		if node, ok := baseRegistry[name]; ok {
+		if node, ok := inputRegistry[name]; ok {
 			t.registry[name] = node
 		} else if node, ok := formulaRegistry[name]; ok {
 			t.registry[name] = node
@@ -127,14 +125,14 @@ func NewCalcTemplate(nodes ...Node) *CalcTemplate {
 	return t
 }
 
-// collectDependencies 递归收集节点及其依赖
+// collectDependencies 递归遍历依赖图。
 func collectDependencies(n Node, required map[string]bool) {
 	if required[n.Name()] {
 		return
 	}
 	required[n.Name()] = true
 	for _, dep := range n.Requires() {
-		if node, ok := baseRegistry[dep]; ok {
+		if node, ok := inputRegistry[dep]; ok {
 			collectDependencies(node, required)
 		} else if node, ok := formulaRegistry[dep]; ok {
 			collectDependencies(node, required)
@@ -144,19 +142,19 @@ func collectDependencies(n Node, required map[string]bool) {
 	}
 }
 
-// NewFullCalcTemplate 包含所有计算节点
+// NewFullCalcTemplate 返回包含所有默认公式的模板。
 func NewFullCalcTemplate() *CalcTemplate {
 	return NewCalcTemplate(
-		formulaRegistry[KeyOriginalF],
-		formulaRegistry[KeyDeviationSettle],
-		formulaRegistry[KeyDeviationProfit],
-		formulaRegistry[KeyTotalFee],
-		formulaRegistry[KeyFinalProfit],
-		formulaRegistry[KeyArbitrage],
+		formulaRegistry[KeyBaseCost],
+		formulaRegistry[KeySettlementImpact],
+		formulaRegistry[KeyScenarioMargin],
+		formulaRegistry[KeyTotalCost],
+		formulaRegistry[KeyNetMargin],
+		formulaRegistry[KeyUnitYield],
 	)
 }
 
-// GetOrderedNodes 返回拓扑排序后的节点列表
+// GetOrderedNodes 以依赖顺序返回节点。
 func (t *CalcTemplate) GetOrderedNodes() ([]Node, error) {
 	cacheKey := ""
 	for _, n := range t.nodes {
@@ -170,7 +168,7 @@ func (t *CalcTemplate) GetOrderedNodes() ([]Node, error) {
 	visited := make(map[string]bool)
 	temp := make(map[string]bool)
 	result := make([]Node, 0, len(t.nodes))
-	var dfs func(n Node) error
+	var dfs func(Node) error
 
 	dfs = func(n Node) error {
 		if temp[n.Name()] {
@@ -186,7 +184,7 @@ func (t *CalcTemplate) GetOrderedNodes() ([]Node, error) {
 				next = node
 			} else if node, ok := formulaRegistry[dep]; ok {
 				next = node
-			} else if node, ok := baseRegistry[dep]; ok {
+			} else if node, ok := inputRegistry[dep]; ok {
 				next = node
 			} else {
 				return fmt.Errorf("node %s not found", dep)
@@ -213,8 +211,8 @@ func (t *CalcTemplate) GetOrderedNodes() ([]Node, error) {
 	return result, nil
 }
 
-// Calc 执行计算
-func (m MomentData) Calc(t *CalcTemplate, includeBaseNodes bool) (map[string]interface{}, error) {
+// Calc 在给定上下文中执行模板。
+func (m ContextInput) Calc(t *CalcTemplate, includeInputNodes bool) (map[string]interface{}, error) {
 	ordered, err := t.GetOrderedNodes()
 	if err != nil {
 		return nil, err
@@ -227,25 +225,22 @@ func (m MomentData) Calc(t *CalcTemplate, includeBaseNodes bool) (map[string]int
 			return nil, fmt.Errorf("node %s compute failed: %w", n.Name(), err)
 		}
 		done[n.Name()] = res
-		if includeBaseNodes || reflect.TypeOf(n) == reflect.TypeOf(FormulaNode{}) {
-			// 格式化输出
+		if includeInputNodes || reflect.TypeOf(n) == reflect.TypeOf(FormulaNode{}) {
 			if result, ok := res.(Result); ok {
-				// 基础节点：将 Result 格式化为 {Q, P, F} 字符串
 				q := "<nil>"
 				p := "<nil>"
-				f := "<nil>"
+				v := "<nil>"
 				if result.Q != nil {
 					q = fmt.Sprintf("%v", float64(*result.Q))
 				}
 				if result.P != nil {
 					p = fmt.Sprintf("%v", float64(*result.P))
 				}
-				if result.F != nil {
-					f = fmt.Sprintf("%v", float64(*result.F))
+				if result.V != nil {
+					v = fmt.Sprintf("%v", float64(*result.V))
 				}
-				results[n.Name()] = fmt.Sprintf("{%s, %s, %s}", q, p, f)
+				results[n.Name()] = fmt.Sprintf("{%s, %s, %s}", q, p, v)
 			} else {
-				// 计算节点：直接存储 float64
 				results[n.Name()] = res
 			}
 		}
@@ -253,7 +248,7 @@ func (m MomentData) Calc(t *CalcTemplate, includeBaseNodes bool) (map[string]int
 	return results, nil
 }
 
-// TTLCache 是带过期时间的缓存
+// TTLCache 是带过期机制的内存缓存。
 type TTLCache struct {
 	cache map[string]cacheEntry
 	mutex sync.RWMutex
@@ -264,14 +259,14 @@ type cacheEntry struct {
 	expiration time.Time
 }
 
-// NewTTLCache 创建新缓存
+// NewTTLCache 创建缓存实例。
 func NewTTLCache() *TTLCache {
 	return &TTLCache{
 		cache: make(map[string]cacheEntry),
 	}
 }
 
-// Set 设置缓存
+// Set 写入带 TTL 的缓存。
 func (c *TTLCache) Set(key string, value interface{}, ttl time.Duration) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -281,7 +276,7 @@ func (c *TTLCache) Set(key string, value interface{}, ttl time.Duration) {
 	}
 }
 
-// Get 获取缓存
+// Get 读取未过期的缓存值。
 func (c *TTLCache) Get(key string) (interface{}, bool) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
@@ -292,39 +287,49 @@ func (c *TTLCache) Get(key string) (interface{}, bool) {
 	return entry.value, true
 }
 
-// 常量定义
 const (
-	KeyActualF         = "实际分时电费"    // 实际分时电费
-	KeyTotalF          = "合计当期电费"    // 合计当期电费
-	KeyLongTermF       = "中长期市场变化电费" // 中长期市场变化电费
-	KeyDADevF          = "日前偏差电费"    // 日前偏差电费
-	KeyRTDevF          = "实时偏差电费"    // 实时偏差电费
-	KeyTransferF       = "传输电费"      // 传输电费
-	KeyOriginalF       = "原电费"       // 原电费
-	KeyDeviationSettle = "偏差结算费用"    // 偏差结算费用
-	KeyDeviationProfit = "偏差收益"      // 偏差收益
-	KeyTotalFee        = "总电费"       // 总电费
-	KeyFinalProfit     = "最终收益"      // 最终收益
-	KeyArbitrage       = "套利收益"      // 套利收益
+	// 默认输入节点标识符。
+	KeyObservedMetrics   = "observed_metrics"
+	KeyAggregateMetrics  = "aggregate_metrics"
+	KeyBaselineMetrics   = "baseline_metrics"
+	KeyScenarioAInputs   = "scenario_a_inputs"
+	KeyScenarioBInputs   = "scenario_b_inputs"
+	KeyOverheadAdjusters = "overhead_adjusters"
+	// 默认公式节点标识符。
+	KeyBaseCost         = "base_cost"
+	KeySettlementImpact = "settlement_impact"
+	KeyScenarioMargin   = "scenario_margin"
+	KeyTotalCost        = "total_cost"
+	KeyNetMargin        = "net_margin"
+	KeyUnitYield        = "unit_yield"
 )
 
-// 注册表
 var (
 	formulaRegistry map[string]Node
-	baseRegistry    map[string]Node
+	inputRegistry   map[string]Node
 	registryMutex   sync.RWMutex
 	sortCache       *TTLCache
 )
 
-func RegisterBase(n baseNode) {
+// RegisterInputNode 注册自定义输入适配器。
+func RegisterInputNode(name string, adapter InputAdapter) {
 	registryMutex.Lock()
 	defer registryMutex.Unlock()
-	if baseRegistry == nil {
-		baseRegistry = make(map[string]Node)
+	if inputRegistry == nil {
+		inputRegistry = make(map[string]Node)
 	}
-	baseRegistry[n.name] = n
+	inputRegistry[name] = inputNode{
+		name:    name,
+		resolve: adapter,
+	}
 }
 
+// RegisterInputAdapter 是 RegisterInputNode 的同义接口，更强调适配语义。
+func RegisterInputAdapter(name string, adapter InputAdapter) {
+	RegisterInputNode(name, adapter)
+}
+
+// RegisterFormula 将公式节点写入全局注册表。
 func RegisterFormula(n FormulaNode) {
 	registryMutex.Lock()
 	defer registryMutex.Unlock()
@@ -335,135 +340,115 @@ func RegisterFormula(n FormulaNode) {
 }
 
 func init() {
-	// 初始化注册表
-	baseRegistry = make(map[string]Node)
+	inputRegistry = make(map[string]Node)
 	formulaRegistry = make(map[string]Node)
 	sortCache = NewTTLCache()
 
-	// 注册基础节点
-	RegisterBase(baseNode{
-		name: KeyActualF,
-		f: func(m MomentData) (q, p, f *OptionalFloat) {
-			return m.ActualQ, m.ActualP, m.ActualF
-		},
+	RegisterInputNode(KeyObservedMetrics, func(m ContextInput) (q, p, v *OptionalFloat) {
+		return m.ObservedQ, m.ObservedP, m.ObservedV
 	})
-	RegisterBase(baseNode{
-		name: KeyTotalF,
-		f: func(m MomentData) (q, p, f *OptionalFloat) {
-			return m.TotalQ, m.TotalP, m.TotalF
-		},
+	RegisterInputNode(KeyAggregateMetrics, func(m ContextInput) (q, p, v *OptionalFloat) {
+		return m.AggregateQ, m.AggregateP, m.AggregateV
 	})
-	RegisterBase(baseNode{
-		name: KeyLongTermF,
-		f: func(m MomentData) (q, p, f *OptionalFloat) {
-			return m.LongTermQ, m.LongTermP, m.LongTermF
-		},
+	RegisterInputNode(KeyBaselineMetrics, func(m ContextInput) (q, p, v *OptionalFloat) {
+		return m.BaselineQ, m.BaselineP, m.BaselineV
 	})
-	RegisterBase(baseNode{
-		name: KeyDADevF,
-		f: func(m MomentData) (q, p, f *OptionalFloat) {
-			return m.DADevQ, m.DADevP, m.DADevF
-		},
+	RegisterInputNode(KeyScenarioAInputs, func(m ContextInput) (q, p, v *OptionalFloat) {
+		return m.ScenarioAQ, m.ScenarioAP, m.ScenarioAV
 	})
-	RegisterBase(baseNode{
-		name: KeyRTDevF,
-		f: func(m MomentData) (q, p, f *OptionalFloat) {
-			return m.RTDevQ, m.RTDevP, m.RTDevF
-		},
+	RegisterInputNode(KeyScenarioBInputs, func(m ContextInput) (q, p, v *OptionalFloat) {
+		return m.ScenarioBQ, m.ScenarioBP, m.ScenarioBV
 	})
-	RegisterBase(baseNode{
-		name: KeyTransferF,
-		f: func(m MomentData) (q, p, f *OptionalFloat) {
-			return m.TransferQ, m.TransferP, m.TransferF
-		},
+	RegisterInputNode(KeyOverheadAdjusters, func(m ContextInput) (q, p, v *OptionalFloat) {
+		return m.OverheadQ, m.OverheadP, m.OverheadV
 	})
 
-	// 注册公式节点
-	// 原电费 = 中长期市场变化电费 + 日前偏差电费 + 实时偏差电费
+	// 基础成本 = 基线 + 场景 A + 场景 B 的估值。
 	RegisterFormula(FormulaNode{
-		name: KeyOriginalF,
-		deps: []string{KeyLongTermF, KeyDADevF, KeyRTDevF},
-		formula: func(m MomentData, prev map[string]interface{}) (float64, error) {
-			if m.LongTermF == nil {
-				return 0, fmt.Errorf("field LongTermF is not set")
+		name: KeyBaseCost,
+		deps: []string{KeyBaselineMetrics, KeyScenarioAInputs, KeyScenarioBInputs},
+		formula: func(m ContextInput, prev map[string]interface{}) (float64, error) {
+			if m.BaselineV == nil {
+				return 0, fmt.Errorf("context.BaselineV is nil")
 			}
-			if m.DADevF == nil {
-				return 0, fmt.Errorf("field DADevF is not set")
+			if m.ScenarioAV == nil {
+				return 0, fmt.Errorf("context.ScenarioAV is nil")
 			}
-			if m.RTDevF == nil {
-				return 0, fmt.Errorf("field RTDevF is not set")
+			if m.ScenarioBV == nil {
+				return 0, fmt.Errorf("context.ScenarioBV is nil")
 			}
 
-			longTermF, ok := prev[KeyLongTermF].(Result)
-			if !ok || longTermF.F == nil {
-				return 0, fmt.Errorf("invalid LongTermF data")
+			baseline, ok := prev[KeyBaselineMetrics].(Result)
+			if !ok || baseline.V == nil {
+				return 0, fmt.Errorf("invalid baseline metrics data")
 			}
-			daDevF, ok := prev[KeyDADevF].(Result)
-			if !ok || daDevF.F == nil {
-				return 0, fmt.Errorf("invalid DADevF data")
+			scenarioA, ok := prev[KeyScenarioAInputs].(Result)
+			if !ok || scenarioA.V == nil {
+				return 0, fmt.Errorf("invalid scenario A data")
 			}
-			rtDevF, ok := prev[KeyRTDevF].(Result)
-			if !ok || rtDevF.F == nil {
-				return 0, fmt.Errorf("invalid RTDevF data")
+			scenarioB, ok := prev[KeyScenarioBInputs].(Result)
+			if !ok || scenarioB.V == nil {
+				return 0, fmt.Errorf("invalid scenario B data")
 			}
-			//fmt.Printf("原电费计算 1 > %v 2 > %v 3 > %v", float64(*longTermF.F), float64(*daDevF.F), float64(*rtDevF.F))
-			fmt.Println()
-			// 使用 utils.DecimalAdd 进行高精度加法
-			return utils.DecimalAdd(float64(*longTermF.F), float64(*daDevF.F), float64(*rtDevF.F)), nil
+
+			return utils.DecimalAdd(
+				float64(*baseline.V),
+				float64(*scenarioA.V),
+				float64(*scenarioB.V),
+			), nil
 		},
 	})
 
-	// 偏差结算费用：
-	// if 日前偏差电价 < 实时偏差电价:
-	//   (合计当期电量 - 中长期市场变化电量 - 日前偏差电量) * (日前偏差电价 - 实时偏差电价)
-	// else:
-	//   (中长期市场变化电量 + 日前偏差电量 - 实际分时电量) * (实时偏差电价 - 日前偏差电价)
+	// 结算影响：根据场景估算量、观测量与价格差。
 	RegisterFormula(FormulaNode{
-		name: KeyDeviationSettle,
-		deps: []string{KeyTotalF, KeyLongTermF, KeyDADevF, KeyRTDevF, KeyActualF},
-		formula: func(m MomentData, prev map[string]interface{}) (float64, error) {
-			if m.DADevP == nil || m.RTDevP == nil || m.DADevQ == nil || m.LongTermQ == nil || m.TotalQ == nil || m.ActualQ == nil {
-				return 0, fmt.Errorf("required fields are not set")
+		name: KeySettlementImpact,
+		deps: []string{
+			KeyAggregateMetrics,
+			KeyBaselineMetrics,
+			KeyScenarioAInputs,
+			KeyScenarioBInputs,
+			KeyObservedMetrics,
+		},
+		formula: func(m ContextInput, prev map[string]interface{}) (float64, error) {
+			if m.ScenarioAP == nil || m.ScenarioBP == nil || m.ScenarioAQ == nil || m.BaselineQ == nil || m.AggregateQ == nil || m.ObservedQ == nil {
+				return 0, fmt.Errorf("missing required settlement inputs")
 			}
 
-			totalQ, ok := prev[KeyTotalF].(Result)
-			if !ok || totalQ.Q == nil {
-				return 0, fmt.Errorf("invalid TotalF data")
+			aggregate, ok := prev[KeyAggregateMetrics].(Result)
+			if !ok || aggregate.Q == nil {
+				return 0, fmt.Errorf("invalid aggregate metrics data")
 			}
-			longTermQ, ok := prev[KeyLongTermF].(Result)
-			if !ok || longTermQ.Q == nil {
-				return 0, fmt.Errorf("invalid LongTermF data")
+			baseline, ok := prev[KeyBaselineMetrics].(Result)
+			if !ok || baseline.Q == nil {
+				return 0, fmt.Errorf("invalid baseline metrics data")
 			}
-			daDevQ, ok := prev[KeyDADevF].(Result)
-			if !ok || daDevQ.Q == nil {
-				return 0, fmt.Errorf("invalid DADevF data")
+			scenarioA, ok := prev[KeyScenarioAInputs].(Result)
+			if !ok || scenarioA.Q == nil {
+				return 0, fmt.Errorf("invalid scenario A quantity")
 			}
-			actualQ, ok := prev[KeyActualF].(Result)
-			if !ok || actualQ.Q == nil {
-				return 0, fmt.Errorf("invalid ActualF data")
+			observed, ok := prev[KeyObservedMetrics].(Result)
+			if !ok || observed.Q == nil {
+				return 0, fmt.Errorf("invalid observed quantity")
 			}
-			daDevP, ok := prev[KeyDADevF].(Result)
-			if !ok || daDevP.P == nil {
-				return 0, fmt.Errorf("invalid DADevP data")
+			scenarioAPrice, ok := prev[KeyScenarioAInputs].(Result)
+			if !ok || scenarioAPrice.P == nil {
+				return 0, fmt.Errorf("invalid scenario A price")
 			}
-			rtDevP, ok := prev[KeyRTDevF].(Result)
-			if !ok || rtDevP.P == nil {
-				return 0, fmt.Errorf("invalid RTDevP data")
+			scenarioBPrice, ok := prev[KeyScenarioBInputs].(Result)
+			if !ok || scenarioBPrice.P == nil {
+				return 0, fmt.Errorf("invalid scenario B price")
 			}
 
-			// 使用 utils.Decimal* 函数进行高精度计算
 			var result float64
-			if float64(*daDevP.P) < float64(*rtDevP.P) {
-				// (totalQ - longTermQ - daDevQ) * (daDevP - rtDevP)
-				diffQ := utils.DecimalSubtract(float64(*totalQ.Q), float64(*longTermQ.Q))
-				diffQ = utils.DecimalSubtract(diffQ, float64(*daDevQ.Q))
-				diffP := utils.DecimalSubtract(float64(*daDevP.P), float64(*rtDevP.P))
+			if float64(*scenarioAPrice.P) < float64(*scenarioBPrice.P) {
+				diffQ := utils.DecimalSubtract(float64(*aggregate.Q), float64(*baseline.Q))
+				diffQ = utils.DecimalSubtract(diffQ, float64(*scenarioA.Q))
+				diffP := utils.DecimalSubtract(float64(*scenarioAPrice.P), float64(*scenarioBPrice.P))
 				result = utils.DecimalMul(diffQ, diffP)
 			} else {
-				// (longTermQ + daDevQ - actualQ) * (rtDevP - daDevP)
-				sumQ := utils.DecimalAdd(float64(*longTermQ.Q), float64(*daDevQ.Q))
-				sumQ = utils.DecimalSubtract(sumQ, float64(*actualQ.Q))
-				diffP := utils.DecimalSubtract(float64(*rtDevP.P), float64(*daDevP.P))
+				sumQ := utils.DecimalAdd(float64(*baseline.Q), float64(*scenarioA.Q))
+				sumQ = utils.DecimalSubtract(sumQ, float64(*observed.Q))
+				diffP := utils.DecimalSubtract(float64(*scenarioBPrice.P), float64(*scenarioAPrice.P))
 				result = utils.DecimalMul(sumQ, diffP)
 			}
 
@@ -471,84 +456,58 @@ func init() {
 		},
 	})
 
-	// 偏差收益：
-	// if 日前偏差电价 < 实时偏差电价:
-	//   (日前偏差电量 + 中长期市场变化电量 - 实际分时电量 * 1.2) * (实时偏差电价 - 日前偏差电价)
-	// else:
-	//   (合计当期电量 * 0.8 - 中长期市场变化电量 - 日前偏差电量) * (日前偏差电价 - 实时偏差电价)
+	// 场景收益：评估观测交付与场景假设差异带来的收益。
 	RegisterFormula(FormulaNode{
-		name: KeyDeviationProfit,
-		deps: []string{KeyTotalF, KeyLongTermF, KeyDADevF, KeyRTDevF, KeyActualF},
-		formula: func(m MomentData, prev map[string]interface{}) (float64, error) {
-			if m.DADevP == nil || m.RTDevP == nil || m.DADevQ == nil || m.LongTermQ == nil || m.TotalQ == nil || m.ActualQ == nil {
-				return 0, fmt.Errorf("required fields are not set")
+		name: KeyScenarioMargin,
+		deps: []string{
+			KeyAggregateMetrics,
+			KeyBaselineMetrics,
+			KeyScenarioAInputs,
+			KeyScenarioBInputs,
+			KeyObservedMetrics,
+		},
+		formula: func(m ContextInput, prev map[string]interface{}) (float64, error) {
+			if m.ScenarioAP == nil || m.ScenarioBP == nil || m.ScenarioAQ == nil || m.BaselineQ == nil || m.AggregateQ == nil || m.ObservedQ == nil {
+				return 0, fmt.Errorf("missing required scenario margin inputs")
 			}
 
-			totalQ, ok := prev[KeyTotalF].(Result)
-			if !ok || totalQ.Q == nil {
-				return 0, fmt.Errorf("invalid TotalF data")
+			aggregate, ok := prev[KeyAggregateMetrics].(Result)
+			if !ok || aggregate.Q == nil {
+				return 0, fmt.Errorf("invalid aggregate metrics data")
 			}
-			longTermQ, ok := prev[KeyLongTermF].(Result)
-			if !ok || longTermQ.Q == nil {
-				return 0, fmt.Errorf("invalid LongTermF data")
+			baseline, ok := prev[KeyBaselineMetrics].(Result)
+			if !ok || baseline.Q == nil {
+				return 0, fmt.Errorf("invalid baseline metrics data")
 			}
-			daDevQ, ok := prev[KeyDADevF].(Result)
-			if !ok || daDevQ.Q == nil {
-				return 0, fmt.Errorf("invalid DADevF data")
+			scenarioA, ok := prev[KeyScenarioAInputs].(Result)
+			if !ok || scenarioA.Q == nil {
+				return 0, fmt.Errorf("invalid scenario A quantity")
 			}
-			actualQ, ok := prev[KeyActualF].(Result)
-			if !ok || actualQ.Q == nil {
-				return 0, fmt.Errorf("invalid ActualF data")
+			observed, ok := prev[KeyObservedMetrics].(Result)
+			if !ok || observed.Q == nil {
+				return 0, fmt.Errorf("invalid observed quantity")
 			}
-			daDevP, ok := prev[KeyDADevF].(Result)
-			if !ok || daDevP.P == nil {
-				return 0, fmt.Errorf("invalid DADevP data")
+			scenarioAPrice, ok := prev[KeyScenarioAInputs].(Result)
+			if !ok || scenarioAPrice.P == nil {
+				return 0, fmt.Errorf("invalid scenario A price")
 			}
-			rtDevP, ok := prev[KeyRTDevF].(Result)
-			if !ok || rtDevP.P == nil {
-				return 0, fmt.Errorf("invalid RTDevP data")
+			scenarioBPrice, ok := prev[KeyScenarioBInputs].(Result)
+			if !ok || scenarioBPrice.P == nil {
+				return 0, fmt.Errorf("invalid scenario B price")
 			}
 
-			// 使用 utils.Decimal* 函数进行高精度计算
 			var result float64
-			if float64(*daDevP.P) < float64(*rtDevP.P) {
-				//   (日前偏差电量 + 中长期市场变化电量 - 实际分时电量 * 1.2) * (实时偏差电价 - 日前偏差电价)
-				//(daDevQ + longTermQ - actualQ * 1.2) * (rtDevP - daDevP)
-				actualQMul := utils.DecimalMul(float64(*actualQ.Q), 1.2)
-				sumQ := utils.DecimalAdd(float64(*daDevQ.Q), float64(*longTermQ.Q))
-				sumQ = utils.DecimalSubtract(sumQ, actualQMul)
-				diffP := utils.DecimalSubtract(float64(*rtDevP.P), float64(*daDevP.P))
+			if float64(*scenarioAPrice.P) < float64(*scenarioBPrice.P) {
+				observedAdjusted := utils.DecimalMul(float64(*observed.Q), 1.2)
+				sumQ := utils.DecimalAdd(float64(*scenarioA.Q), float64(*baseline.Q))
+				sumQ = utils.DecimalSubtract(sumQ, observedAdjusted)
+				diffP := utils.DecimalSubtract(float64(*scenarioBPrice.P), float64(*scenarioAPrice.P))
 				result = utils.DecimalMul(sumQ, diffP)
-				//// Step 1: 计算 actualQMul = actualQ.Q * 1.2
-				//fmt.Printf("[Step1] actualQ.Q = %v\n", *actualQ.Q)
-				//actualQMul := utils.DecimalMul(float64(*actualQ.Q), 1.2)
-				//fmt.Printf("[Step1] actualQMul = actualQ.Q * 1.2 = %v\n\n", actualQMul)
-				//
-				//// Step 2: sumQ = daDevQ.Q + longTermQ.Q
-				//fmt.Printf("[Step2] daDevQ.Q = %v, longTermQ.Q = %v\n", *daDevQ.Q, *longTermQ.Q)
-				//sumQ := utils.DecimalAdd(float64(*daDevQ.Q), float64(*longTermQ.Q))
-				//fmt.Printf("[Step2] sumQ(before subtract) = daDevQ.Q + longTermQ.Q = %v\n\n", sumQ)
-				//
-				//// Step 3: sumQ = sumQ - actualQMul
-				//fmt.Printf("[Step3] sumQ(before) = %v, actualQMul = %v\n", sumQ, actualQMul)
-				//sumQ = utils.DecimalSubtract(sumQ, actualQMul)
-				//fmt.Printf("[Step3] sumQ(after subtract) = sumQ - actualQMul = %v\n\n", sumQ)
-				//
-				//// Step 4: diffP = rtDevP.P - daDevP.P
-				//fmt.Printf("[Step4] rtDevP.P = %v, daDevP.P = %v\n", *rtDevP.P, *daDevP.P)
-				//diffP := utils.DecimalSubtract(float64(*rtDevP.P), float64(*daDevP.P))
-				//fmt.Printf("[Step4] diffP = rtDevP.P - daDevP.P = %v\n\n", diffP)
-				//
-				//// Step 5: result = sumQ * diffP
-				//fmt.Printf("[Step5] sumQ = %v, diffP = %v\n", sumQ, diffP)
-				//result = utils.DecimalMul(sumQ, diffP)
-				//fmt.Printf("[Step5] result = sumQ * diffP = %v\n", result)
 			} else {
-				// (totalQ * 0.8 - longTermQ - daDevQ) * (daDevP - rtDevP)
-				totalQMul := utils.DecimalMul(float64(*totalQ.Q), 0.8)
-				diffQ := utils.DecimalSubtract(totalQMul, float64(*longTermQ.Q))
-				diffQ = utils.DecimalSubtract(diffQ, float64(*daDevQ.Q))
-				diffP := utils.DecimalSubtract(float64(*daDevP.P), float64(*rtDevP.P))
+				aggregateAdjusted := utils.DecimalMul(float64(*aggregate.Q), 0.8)
+				diffQ := utils.DecimalSubtract(aggregateAdjusted, float64(*baseline.Q))
+				diffQ = utils.DecimalSubtract(diffQ, float64(*scenarioA.Q))
+				diffP := utils.DecimalSubtract(float64(*scenarioAPrice.P), float64(*scenarioBPrice.P))
 				result = utils.DecimalMul(diffQ, diffP)
 			}
 
@@ -556,68 +515,64 @@ func init() {
 		},
 	})
 
-	// 总电费 = 原电费 + 偏差收益
+	// 总成本 = 基础成本 + 结算影响。
 	RegisterFormula(FormulaNode{
-		name: KeyTotalFee,
-		deps: []string{KeyOriginalF, KeyDeviationProfit},
-		formula: func(m MomentData, prev map[string]interface{}) (float64, error) {
-			originalF, ok := prev[KeyOriginalF].(float64)
+		name: KeyTotalCost,
+		deps: []string{KeyBaseCost, KeySettlementImpact},
+		formula: func(m ContextInput, prev map[string]interface{}) (float64, error) {
+			baseCost, ok := prev[KeyBaseCost].(float64)
 			if !ok {
-				return 0, fmt.Errorf("KeyOriginalF not found or invalid type")
+				return 0, fmt.Errorf("base cost is unavailable")
 			}
-			// 修正：使用 KeyDeviationSettle 而非 KeyDeviationProfit
-			devSettle, ok := prev[KeyDeviationProfit].(float64)
+			settlement, ok := prev[KeySettlementImpact].(float64)
 			if !ok {
-				return 0, fmt.Errorf("KeyDeviationSettle not found or invalid type")
+				return 0, fmt.Errorf("settlement impact is unavailable")
 			}
 
-			// 使用 utils.DecimalAdd 进行高精度加法
-			return utils.DecimalAdd(originalF, devSettle), nil
+			return utils.DecimalAdd(baseCost, settlement), nil
 		},
 	})
 
-	// 最终收益 = 偏差结算费用 - 偏差收益
+	// 净收益 = 结算影响 - 场景收益。
 	RegisterFormula(FormulaNode{
-		name: KeyFinalProfit,
-		deps: []string{KeyDeviationSettle, KeyDeviationProfit},
-		formula: func(m MomentData, prev map[string]interface{}) (float64, error) {
-			devSettle, ok := prev[KeyDeviationSettle].(float64)
+		name: KeyNetMargin,
+		deps: []string{KeySettlementImpact, KeyScenarioMargin},
+		formula: func(m ContextInput, prev map[string]interface{}) (float64, error) {
+			settlement, ok := prev[KeySettlementImpact].(float64)
 			if !ok {
-				return 0, fmt.Errorf("KeyDeviationSettle not found or invalid type")
+				return 0, fmt.Errorf("settlement impact is unavailable")
 			}
-			devProfit, ok := prev[KeyDeviationProfit].(float64)
+			margin, ok := prev[KeyScenarioMargin].(float64)
 			if !ok {
-				return 0, fmt.Errorf("KeyDeviationProfit not found or invalid type")
+				return 0, fmt.Errorf("scenario margin is unavailable")
 			}
 
-			// 使用 utils.DecimalSubtract 进行高精度减法
-			return utils.DecimalSubtract(devSettle, devProfit), nil
+			return utils.DecimalSubtract(settlement, margin), nil
 		},
 	})
 
-	// 套利收益 = 最终收益 / 合计当期电量
+	// 单位收益 = 净收益 / 汇总量。
 	RegisterFormula(FormulaNode{
-		name: KeyArbitrage,
-		deps: []string{KeyFinalProfit, KeyTotalF},
-		formula: func(m MomentData, prev map[string]interface{}) (float64, error) {
-			if m.TotalQ == nil {
-				return 0, fmt.Errorf("field TotalQ is not set")
+		name: KeyUnitYield,
+		deps: []string{KeyNetMargin, KeyAggregateMetrics},
+		formula: func(m ContextInput, prev map[string]interface{}) (float64, error) {
+			if m.AggregateQ == nil {
+				return 0, fmt.Errorf("context.AggregateQ is nil")
 			}
-			totalQ, ok := prev[KeyTotalF].(Result)
-			if !ok || totalQ.Q == nil {
-				return 0, fmt.Errorf("invalid TotalF data")
+			aggregate, ok := prev[KeyAggregateMetrics].(Result)
+			if !ok || aggregate.Q == nil {
+				return 0, fmt.Errorf("invalid aggregate metrics data")
 			}
-			finalProfit, ok := prev[KeyFinalProfit].(float64)
+			netMargin, ok := prev[KeyNetMargin].(float64)
 			if !ok {
-				return 0, fmt.Errorf("KeyFinalProfit not found or invalid type")
+				return 0, fmt.Errorf("net margin is unavailable")
 			}
 
-			if float64(*totalQ.Q) == 0 {
-				return 0, nil // 避免除以 0
+			if float64(*aggregate.Q) == 0 {
+				return 0, nil
 			}
 
-			// 使用 utils.DecimalDivide 进行高精度除法，保留 4 位小数
-			return utils.DecimalDivide(finalProfit, float64(*totalQ.Q), 4), nil
+			return utils.DecimalDivide(netMargin, float64(*aggregate.Q), 4), nil
 		},
 	})
 }
